@@ -1,0 +1,14 @@
+[package]
+name = "wke"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = [
+    "cdylib",     # If you want a shared/dynamic C library (advanced)
+    "lib",        # For `generate-headers` and other downstream rust dependents
+                  # such as integration `tests/`, doctests, and `examples/`
+]
+
+[dependencies]
+libc = "0.2.155"
