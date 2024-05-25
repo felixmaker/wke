@@ -4,21 +4,18 @@ mod ul_sys;
 use libc::*;
 use ul_sys::*;
 
-use std::{rc::Rc, sync::OnceLock};
+use std::{
+    rc::Rc,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
-#[repr(transparent)]
-struct Render(*mut ul_sys::C_Renderer);
-unsafe impl Send for Render {}
-unsafe impl Sync for Render {}
-static RENDERER: OnceLock<Render> = OnceLock::new();
+static RENDERER: AtomicPtr<ul_sys::C_Renderer> = AtomicPtr::new(std::ptr::null_mut());
 
 #[no_mangle]
 pub extern "C" fn wkeInit() {
-    println!("{}",123123123);
     unsafe {
-        
         ulEnablePlatformFontLoader();
-        let file_system= ulCreateString(c"./".as_ptr());
+        let file_system = ulCreateString(c"./".as_ptr());
         ulEnablePlatformFileSystem(file_system);
 
         let log_path = ulCreateString(c"./ultralight.log".as_ptr());
@@ -26,22 +23,23 @@ pub extern "C" fn wkeInit() {
         ulDestroyString(log_path);
 
         let config = ulCreateConfig();
-        println!("{:?}", config);
-        let render = ulCreateRenderer(config);
-        println!("{:?}", render);
+
+        let mut render = ulCreateRenderer(config);
         ulDestroyConfig(config);
         ulDestroyString(file_system);
-        RENDERER.set(Render(render));
+
+        RENDERER.store(render, Ordering::Release);
+        std::mem::ManuallyDrop::new(render);
     }
 }
 
 #[no_mangle]
 pub extern "C" fn wkeCreateWebView() -> *mut c_void {
-    let renderer = RENDERER.get().unwrap();
+    let renderer = RENDERER.load(Ordering::Acquire);
     unsafe {
         let config = ulCreateViewConfig();
         ulViewConfigSetIsAccelerated(config, false);
-        let view = ulCreateView(renderer.0, 400, 400, config, 0 as _);
+        let view = ulCreateView(renderer, 400, 400, config, 0 as _);
         ulDestroyViewConfig(config);
         view as _
     }
@@ -57,21 +55,16 @@ pub extern "C" fn wkeLoadURL(view: *mut c_void, url: *const c_char) {
 }
 
 #[no_mangle]
-pub extern "C" fn wkeSetZoomFactor(view: *mut c_void, factor: c_float) {
-    unsafe { ulViewSetDeviceScale(view as _, factor as _) }
-}
-
-#[no_mangle]
 pub extern "C" fn wkeFocus(view: *mut c_void) {
     unsafe { ulViewFocus(view as _) }
 }
 
 #[no_mangle]
 pub extern "C" fn wkePaint(view: *mut c_void, bits: *mut c_void, pitch: c_int) {
+    let renderer = RENDERER.load(Ordering::Acquire);
     unsafe {
-        let render = RENDERER.get().unwrap().0;
-        ulUpdate(render);
-        ulRender(render);
+        ulUpdate(renderer);
+        ulRender(renderer);
         let surface = ulViewGetSurface(view as _);
         let bitmap = ulBitmapSurfaceGetBitmap(surface);
         let length = ulBitmapGetSize(bitmap);
@@ -118,19 +111,38 @@ pub extern "C" fn wkeMouseEvent(
     y: c_int,
     flags: c_uint,
 ) {
-
     let type_ = match message {
         WKE_MSG_MOUSEMOVE => kMouseEventType_MouseMoved,
-        WKE_MSG_LBUTTONDOWN | WKE_MSG_RBUTTONDOWN | WKE_MSG_MBUTTONDOWN => kMouseEventType_MouseDown,
-        WKE_MSG_LBUTTONUP| WKE_MSG_RBUTTONUP |WKE_MSG_MBUTTONUP=> kMouseEventType_MouseUp,
-        _ => return
+        WKE_MSG_LBUTTONDOWN | WKE_MSG_RBUTTONDOWN | WKE_MSG_MBUTTONDOWN => {
+            kMouseEventType_MouseDown
+        }
+        WKE_MSG_LBUTTONUP | WKE_MSG_RBUTTONUP | WKE_MSG_MBUTTONUP => kMouseEventType_MouseUp,
+        _ => return,
     };
     let button = match message {
         WKE_MSG_LBUTTONDOWN | WKE_MSG_LBUTTONUP | WKE_MSG_LBUTTONDBLCLK => kMouseButton_Left,
         WKE_MSG_RBUTTONDOWN | WKE_MSG_RBUTTONUP | WKE_MSG_RBUTTONDBLCLK => kMouseButton_Right,
         WKE_MSG_MBUTTONDOWN | WKE_MSG_MBUTTONUP | WKE_MSG_MBUTTONDBLCLK => kMouseButton_Middle,
-        _ => return
+        _ => return,
     };
-    unsafe {let mouse_event = ulCreateMouseEvent(type_, x, y, button);
-    ulViewFireMouseEvent(view as _, mouse_event)}
+    unsafe {
+        let mouse_event = ulCreateMouseEvent(type_, x, y, button);
+        ulViewFireMouseEvent(view as _, mouse_event);
+        ulDestroyMouseEvent(mouse_event);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wkeMouseWheel(
+    view: *mut c_void,
+    x: c_int,
+    y: c_int,
+    delta: c_int,
+    flags: c_uint,
+) {
+    unsafe {
+        let scroll_event = ulCreateScrollEvent(kScrollEventType_ScrollByPixel, delta, delta);
+        ulViewFireScrollEvent(view as _, scroll_event);
+        ulDestroyScrollEvent(scroll_event);
+    }
 }
